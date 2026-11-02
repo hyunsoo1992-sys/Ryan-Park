@@ -1,6 +1,3 @@
-
-"""Korea Market Evening Digest: Gemini AI + RSS + Telegram."""
-
 import datetime as dt
 import email.utils
 import hashlib
@@ -16,557 +13,148 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 
-KST = ZoneInfo("Asia/Seoul")
-
-CHAT_ID = (
-    os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    or "-1004343274047"
-)
-
-DRY_RUN = os.getenv("DRY_RUN", "0").lower() in ("1", "true", "yes")
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-
-TOPICS = [
-    "site:reuters.com South Korea stocks semiconductor",
-    "site:yonhapnews.co.kr 증시 기업 공시",
-    "site:hankyung.com 증시 반도체 기업",
-    "site:mk.co.kr/news 주식 기업 투자",
-    "site:biz.chosun.com 기업 주식 반도체",
-    "site:ft.com South Korea stocks",
-    "site:bloomberg.com South Korea stocks",
-    "site:dart.fss.or.kr 공시",
-    "한국 증시 반도체 조선 방산 은행 배터리",
+KST = ZoneInfo('Asia/Seoul')
+CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '').strip() or '-1004343274047'
+DRY_RUN = os.getenv('DRY_RUN', '0').lower() in ('1', 'true', 'yes')
+MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash').strip()
+STRICT_AI = os.getenv('STRICT_AI', '1').lower() in ('1', 'true', 'yes')
+MAX_MESSAGE = 3900
+QUERIES = [
+    'site:reuters.com South Korea stocks semiconductor',
+    'site:yonhapnews.co.kr 증시 기업 공시',
+    'site:hankyung.com 증시 반도체 기업',
+    'site:mk.co.kr/news 주식 기업 투자',
+    'site:biz.chosun.com 기업 주식 반도체',
+    'site:ft.com South Korea stocks',
+    'site:bloomberg.com South Korea stocks',
+    'site:dart.fss.or.kr 공시',
+    '한국 증시 반도체 조선 방산 은행 배터리',
 ]
-
-SOURCE_PRIORITY = {
-    "reuters": 10,
-    "bloomberg": 10,
-    "financial times": 9,
-    "ft.com": 9,
-    "연합뉴스": 8,
-    "yonhap": 8,
-    "한국경제": 7,
-    "hankyung": 7,
-    "매일경제": 7,
-    "maeil": 7,
-    "조선비즈": 7,
-    "chosunbiz": 7,
-}
-
-TOPIC_WORDS = {
-    "SEMICONDUCTORS": [
-        "반도체", "삼성전자", "하이닉스", "hbm",
-        "dram", "nand", "memory", "semiconductor",
-        "sk hynix", "micron",
-    ],
-    "AI & TECHNOLOGY": [
-        "인공지능", "데이터센터", "ai ", "gpu",
-        "nvidia", "cloud", "서버",
-    ],
-    "BANKS": [
-        "은행", "금융지주", "bank", "kb금융",
-        "신한", "하나금융", "우리금융",
-    ],
-    "DEFENSE": [
-        "방산", "방위", "국방", "defense",
-        "한화에어로", "lig넥스원",
-    ],
-    "SHIPBUILDING": [
-        "조선", "선박", "수주", "shipbuilding",
-        "현대중공업", "한화오션",
-    ],
-    "BATTERIES": [
-        "배터리", "2차전지", "이차전지", "battery",
-        "lg에너지솔루션", "삼성sdi",
-    ],
-    "AUTOS": [
-        "자동차", "현대차", "기아", "automotive",
-        "hyundai motor",
-    ],
-    "ENERGY": [
-        "정유", "원유", "석유", "oil", "refining",
-        "lng", "가스",
-    ],
-    "CAPITAL MARKETS": [
-        "증시", "코스피", "코스닥", "주가",
-        "자사주", "배당", "공시", "유상증자",
-        "인수합병", "ipo", "kospi", "kosdaq",
-        "buyback", "dividend", "merger",
-    ],
-}
+WORDS = ['삼성', '하이닉스', '반도체', '은행', '금융', '방산', '조선', '배터리', '증시', '코스피', '코스닥', '주식', '주가', '공시', '수주', '자사주', '배당', '유상증자', '투자', '실적', '합병', '상장', 'semiconductor', 'stock', 'kospi', 'korea', 'memory', 'earnings', 'buyback']
+SOURCES = ['reuters', 'bloomberg', 'ft.com', 'financial times', '연합뉴스', 'yonhap', '한국경제', 'hankyung', '매일경제', '조선비즈']
 
 
-def request(url, data=None, headers=None, timeout=35):
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "User-Agent": "Mozilla/5.0 KoreaMarketDigest/2.0",
-            **(headers or {}),
-        },
-    )
+def http(url, payload=None, headers=None, timeout=30):
+    req = urllib.request.Request(url, data=payload, headers={'User-Agent': 'Mozilla/5.0 KoreaDigest/3.0', **(headers or {})})
     with urllib.request.urlopen(req, timeout=timeout) as response:
         return response.read()
 
 
-def get_feed(query):
-    url = "https://news.google.com/rss/search?" + urllib.parse.urlencode({
-        "q": query + " when:7d",
-        "hl": "ko",
-        "gl": "KR",
-        "ceid": "KR:ko",
-    })
-
-    root = ET.fromstring(request(url))
-    entries = []
-
-    for item in root.findall(".//item"):
-        title = (item.findtext("title") or "").strip()
-        link = (item.findtext("link") or "").strip()
-        published = item.findtext("pubDate") or ""
-        source = item.find("source")
-
+def feed(query):
+    url = 'https://news.google.com/rss/search?' + urllib.parse.urlencode({'q': query + ' when:7d', 'hl': 'ko', 'gl': 'KR', 'ceid': 'KR:ko'})
+    root = ET.fromstring(http(url, timeout=25))
+    result = []
+    for node in root.findall('.//item'):
+        title = (node.findtext('title') or '').strip()
+        link = (node.findtext('link') or '').strip()
+        raw_date = node.findtext('pubDate') or ''
+        source_node = node.find('source')
         if not title or not link:
             continue
-
         try:
-            timestamp = email.utils.parsedate_to_datetime(
-                published
-            ).astimezone(KST)
+            published = email.utils.parsedate_to_datetime(raw_date).astimezone(KST)
         except (ValueError, TypeError, OverflowError):
             continue
-
-        entries.append({
-            "title": title,
-            "url": link,
-            "published_kst": timestamp.isoformat(),
-            "source": (
-                source.text.strip()
-                if source is not None and source.text
-                else "Unknown"
-            ),
-        })
-
-    return entries
+        source = source_node.text.strip() if source_node is not None and source_node.text else 'Unknown'
+        result.append({'title': title, 'url': link, 'source': source, 'published': published.isoformat()})
+    return result
 
 
-def collect(date):
-    start = dt.datetime.combine(date, dt.time(15, 0), KST)
-    end = dt.datetime.combine(date, dt.time(21, 0), KST)
-
-    found = {}
-
-    for topic in TOPICS:
+def collect(day):
+    start = dt.datetime.combine(day, dt.time(15), KST)
+    end = dt.datetime.combine(day, dt.time(21), KST)
+    unique = {}
+    for query in QUERIES:
         try:
-            entries = get_feed(topic)
-            logging.info("RSS %s: %d results", topic, len(entries))
-
-            for item in entries:
-                stamp = dt.datetime.fromisoformat(
-                    item["published_kst"]
-                )
-
+            items = feed(query)
+            logging.info('RSS %s: %d results', query, len(items))
+            for item in items:
+                stamp = dt.datetime.fromisoformat(item['published'])
                 if not start <= stamp <= end:
                     continue
-
-                normalized = re.sub(
-                    r"\W+", "", item["title"].casefold()
-                )
-                key = hashlib.sha256(
-                    normalized.encode("utf-8")
-                ).hexdigest()
-
-                found.setdefault(key, item)
-
+                key = hashlib.sha256(re.sub(r'\W+', '', item['title'].casefold()).encode()).hexdigest()
+                unique.setdefault(key, item)
         except Exception as exc:
-            logging.warning("RSS query failed: %s", exc)
-
-        time.sleep(0.2)
-
-    return list(found.values())
-
-
-def classify(title):
-    title_lower = title.casefold()
-
-    for topic, keywords in TOPIC_WORDS.items():
-        if any(
-            word.casefold() in title_lower
-            for word in keywords
-        ):
-            return topic
-
-    return "KOREA EQUITIES"
-
-
-def priority(item):
-    source = item["source"].casefold()
-    title = item["title"].casefold()
-
-    source_score = max(
-        (
-            value
-            for name, value in SOURCE_PRIORITY.items()
-            if name in source
-        ),
-        default=1,
-    )
-
-    relevance = sum(
-        1
-        for words in TOPIC_WORDS.values()
-        for word in words
-        if word.casefold() in title
-    )
-
-    return (
-        source_score * 10 + min(relevance, 10),
-        item["published_kst"],
-    )
-
-
-def shortlist(items):
-    ranked = sorted(items, key=priority, reverse=True)
-
-    selected = []
-    seen = set()
-
-    for item in ranked:
-        # Prevent identical headlines from appearing twice.
-        title = re.sub(
-            r"\s*[-|]\s*[^-|]+$", "", item["title"]
-        ).strip().casefold()
-
-        if title in seen:
-            continue
-
-        seen.add(title)
-        selected.append(item)
-
-        if len(selected) >= 15:
-            break
-
-    return selected
-
-
-def gemini_digest(items):
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is missing")
-
-    input_items = [
-        {
-            "id": i,
-            "title": item["title"],
-            "source": item["source"],
-            "published_kst": item["published_kst"],
-        }
-        for i, item in enumerate(items)
-    ]
-
-    prompt = """
-You are an institutional Korea equity news editor.
-
-Create an English evening news digest for Telegram.
-
-IMPORTANT:
-- You have RSS HEADLINES, not verified full articles.
-- Use only the supplied headlines.
-- Never invent figures, company announcements, quotes,
-  market moves, dates or other details.
-- Translate Korean headlines into fluent financial English.
-- Produce a concise English headline and 1-2 factual sentences.
-- Do not pad summaries with generic commentary.
-- Do not add implications, trade ideas, positioning,
-  investment opinions or investor questions.
-- No numbering.
-- Avoid duplicate stories.
-- Prioritize market-moving Korean equity news.
-- Keep original article IDs unchanged.
-- Do not invent URLs; URLs will be attached by Python.
-- Return ONLY a valid JSON object.
-
-JSON schema:
-{
-  "articles": [
-    {
-      "id": 0,
-      "topic": "SEMICONDUCTORS",
-      "headline": "Concise factual English headline",
-      "summary": "One or two short factual sentences."
-    }
-  ]
-}
-
-Topic labels should be concise, in uppercase.
-Do not include markdown fences.
-
-RSS ITEMS:
-""" + json.dumps(input_items, ensure_ascii=False)
-
-    url = (
-        "https://generativelanguage.googleapis.com/"
-        f"v1beta/models/{urllib.parse.quote(MODEL)}:generateContent"
-    )
-
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": prompt}],
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": 4500,
-            "responseMimeType": "application/json",
-        },
-    }
-
-    raw = request(
-        url,
-        json.dumps(payload).encode("utf-8"),
-        headers={
-            "x-goog-api-key": api_key,
-            "Content-Type": "application/json",
-        },
-        timeout=90,
-    )
-
-    response = json.loads(raw)
-
-    text = "".join(
-        part.get("text", "")
-        for candidate in response.get("candidates", [])
-        for part in candidate.get("content", {}).get("parts", [])
-    ).strip()
-
-    if not text:
-        raise RuntimeError("Gemini returned an empty response")
-
-    parsed = json.loads(text)
-    generated = parsed.get("articles", [])
-
-    if not isinstance(generated, list):
-        raise RuntimeError("Invalid Gemini article list")
-
-    valid = []
-    used_ids = set()
-
-    for article in generated:
-        if not isinstance(article, dict):
-            continue
-
-        index = article.get("id")
-
-        if type(index) is not int:
-            continue
-
-        if not 0 <= index < len(items):
-            continue
-
-        if index in used_ids:
-            continue
-
-        headline = str(article.get("headline", "")).strip()
-        summary = str(article.get("summary", "")).strip()
-        topic = str(article.get("topic", "")).strip()
-
-        if not headline or not summary:
-            continue
-
-        # Restrict formatting and remove embedded URLs.
-        topic = re.sub(r"[^A-Z0-9 &/-]", "", topic.upper())
-        topic = topic[:40] or classify(items[index]["title"])
-
-        headline = re.sub(r"\s+", " ", headline)[:220]
-        summary = re.sub(r"https?://\S+", "", summary)
-        summary = re.sub(r"\s+", " ", summary).strip()[:650]
-
-        valid.append({
-            "id": index,
-            "topic": topic,
-            "headline": headline,
-            "summary": summary,
-        })
-
-        used_ids.add(index)
-
-    if not valid:
-        raise RuntimeError("Gemini produced no valid articles")
-
-    return valid[:15]
-
-
-def fallback_digest(items):
-    """Free fallback: original RSS headlines, no invented summary."""
-    return [
-        {
-            "id": i,
-            "topic": classify(item["title"]),
-            "headline": item["title"],
-            "summary": "",
-        }
-        for i, item in enumerate(items)
-    ]
-
-
-def build_message(items, date):
-    try:
-        articles = gemini_digest(items)
-        mode = "AI-edited headlines"
-        logging.info("Gemini generated %d articles", len(articles))
-
-    except Exception as exc:
-        logging.warning(
-            "Gemini unavailable; using RSS headline fallback: %s",
-            str(exc)[:300],
-        )
-        articles = fallback_digest(items)
-        mode = "RSS headlines only"
-
-    sections = [
-        f"KOREA MARKET | EVENING NEWS DIGEST\n"
-        f"{date:%d %b %Y} | 15:00-21:00 KST\n"
-        f"{mode}\n"
-    ]
-
-    for article in articles:
-        item = items[article["id"]]
-
-        section = (
-            f"# {article['topic']}: {article['headline']}\n"
-        )
-
-        if article["summary"]:
-            section += f"{article['summary']}\n"
-
-        section += (
-            f"Source: {item['source']}\n"
-            f"{item['url']}"
-        )
-
-        sections.append(section)
-
-    return sections
-
-
-def split_messages(sections, max_length=3800):
-    chunks = []
-    current = ""
-
-    for section in sections:
-        candidate = (
-            current + "\n\n" + section
-            if current else section
-        )
-
-        if len(candidate) > max_length and current:
-            chunks.append(current)
-            current = section
-        else:
-            current = candidate
-
-        if len(current) > max_length:
-            raise RuntimeError(
-                "Single news item exceeds Telegram limit"
-            )
-
-    if current:
-        chunks.append(current)
-
-    return chunks
-
-
-def send(sections):
-    token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
-
-    if not CHAT_ID:
-        raise RuntimeError("Telegram chat ID is empty")
-
-    for index, chunk in enumerate(
-        split_messages(sections), start=1
-    ):
-        payload = urllib.parse.urlencode({
-            "chat_id": CHAT_ID,
-            "text": chunk,
-            "disable_web_page_preview": "true",
-        }).encode("utf-8")
-
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-
+            logging.warning('RSS feed failed: %s', str(exc)[:200])
+    ranked = sorted(unique.values(), key=lambda x: (sum(w in x['title'].casefold() for w in WORDS) * 3 + sum(s in x['source'].casefold() for s in SOURCES) * 2, x['published']), reverse=True)
+    logging.info('Eligible RSS entries: %d', len(ranked))
+    return ranked[:20]
+
+
+def gemini(items):
+    key = os.getenv('GEMINI_API_KEY', '').strip()
+    if not key:
+        raise RuntimeError('GEMINI_API_KEY is missing')
+    payload_items = [{'id': i, 'headline': item['title'], 'source': item['source']} for i, item in enumerate(items)]
+    prompt = '''You are a factual institutional Korean equity news editor. Input is RSS HEADLINES ONLY, not article bodies. Return JSON with exactly the schema {"articles":[{"id":0,"topic":"SEMICONDUCTORS","headline":"English headline","summary":"One or two short factual sentences."}]}. Select 10-15 distinct market-relevant articles, or fewer if there are fewer meaningful articles. Translate Korean headlines to English. Preserve input IDs exactly. Use no facts beyond the supplied headline; never invent numbers, details, or context. If a headline cannot support a factual summary, write a short faithful restatement. No investment views, implications, generic commentary, speculation, numbering, or URLs. Each headline max 100 characters and summary max 170 characters. Output JSON only. INPUT: ''' + json.dumps(payload_items, ensure_ascii=False)
+    body = json.dumps({'contents': [{'parts': [{'text': prompt}]}], 'generationConfig': {'temperature': 0.1, 'maxOutputTokens': 3500, 'responseMimeType': 'application/json'}}).encode()
+    url = f'https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(MODEL)}:generateContent'
+    last_error = None
+    for attempt in range(1, 4):
         try:
-            raw = request(url, payload)
-            result = json.loads(raw)
-
-            if not result.get("ok"):
-                raise RuntimeError(
-                    result.get("description", "Telegram error")
-                )
-
-            logging.info(
-                "Telegram message %d sent successfully",
-                index,
-            )
-
+            logging.info('Gemini attempt %d/3 model=%s', attempt, MODEL)
+            raw = http(url, body, {'Content-Type': 'application/json', 'x-goog-api-key': key}, timeout=65)
+            data = json.loads(raw)
+            content = ''.join(part.get('text', '') for c in data.get('candidates', []) for part in c.get('content', {}).get('parts', []))
+            if not content:
+                raise RuntimeError('Empty Gemini response')
+            rows = json.loads(content)['articles']
+            result, seen = [], set()
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                idx = row.get('id')
+                if type(idx) is not int or idx < 0 or idx >= len(items) or idx in seen:
+                    continue
+                topic = re.sub(r'[^A-Z0-9 &/\-]', '', str(row.get('topic', 'KOREA EQUITIES')).upper())[:32] or 'KOREA EQUITIES'
+                headline = re.sub(r'\s+', ' ', str(row.get('headline', ''))).strip()[:120]
+                summary = re.sub(r'\s+', ' ', str(row.get('summary', ''))).strip()[:230]
+                if not headline or not summary:
+                    continue
+                result.append({'id': idx, 'topic': topic, 'headline': headline, 'summary': summary})
+                seen.add(idx)
+                if len(result) == 15:
+                    break
+            if not result:
+                raise RuntimeError('No usable articles returned by Gemini')
+            logging.info('Gemini generated %d articles', len(result))
+            return result
         except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode(
-                "utf-8", errors="replace"
-            ).replace(token, "[REDACTED]")
-
-            logging.error(
-                "Telegram HTTP %d: %s",
-                exc.code,
-                error_body,
-            )
-            raise RuntimeError(
-                f"Telegram delivery failed: HTTP {exc.code}"
-            ) from None
-
-
-def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
-
-    today = dt.datetime.now(KST).date()
-
-    date = (
-        dt.date.fromisoformat(os.environ["DIGEST_DATE"].strip())
-        if os.getenv("DIGEST_DATE", "").strip()
-        else today
-    )
-
-    articles = collect(date)
-
-    logging.info(
-        "Eligible RSS entries for %s: %d",
-        date,
-        len(articles),
-    )
-
-    if not articles:
-        logging.warning("No news found for requested window")
-        return
-
-    selected = shortlist(articles)
-    sections = build_message(selected, date)
-
-    if DRY_RUN:
-        logging.info("DRY RUN: Telegram delivery disabled")
-        for chunk in split_messages(sections):
-            print("\n" + chunk + "\n")
-    else:
-        send(sections)
-
-    logging.info("Digest completed successfully")
+            details = exc.read().decode('utf-8', errors='replace')[:350].replace(key, '[REDACTED]')
+            last_error = f'HTTP {exc.code}: {details}'
+            logging.warning('Gemini attempt %d failed: %s', attempt, last_error)
+            if exc.code in (400, 401, 403, 404):
+                break
+        except Exception as exc:
+            last_error = str(exc).replace(key, '[REDACTED]')
+            logging.warning('Gemini attempt %d failed: %s', attempt, last_error[:350])
+        if attempt < 3:
+            time.sleep(3 * attempt)
+    raise RuntimeError('Gemini failed after retries: ' + str(last_error)[:300])
 
 
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        logging.exception("Digest failed")
-        sys.exit(1)
+def compose(day, items, articles):
+    header = f'KOREA MARKET | EVENING NEWS DIGEST\n{day:%d %b %Y} | 15:00-21:00 KST'
+    sections = []
+    for article in articles:
+        original = items[article['id']]
+        headline = article['headline'].replace('\n', ' ').strip()
+        summary = article['summary'].replace('\n', ' ').strip()
+        url = original['url']
+        section = f"# {article['topic']}: {headline}\n{summary}\nSource: {original['source']}\n{url}"
+        sections.append(section)
+    result = header
+    used = 0
+    for section in sections:
+        candidate = result + '\n\n' + section
+        if len(candidate) > MAX_MESSAGE:
+            continue
+        result = candidate
+        used += 1
+    if not used:
+        raise RuntimeError('No article fits within one Telegram message')
+    logging.info('Single-message digest: %d articles, %d characters', used, len(result))
+    return result
+
+
+def send(message):
