@@ -1,11 +1,8 @@
-
 name: Korea Market Telegram Digest
 
 on:
   schedule:
-    # 22:00 KST = 13:00 UTC
-    - cron: "0 13 * * *"
-
+    - cron: "0 13 * * *" # 22:00 KST
   workflow_dispatch:
     inputs:
       digest_date:
@@ -13,9 +10,8 @@ on:
         required: false
         default: ""
         type: string
-
       dry_run:
-        description: "Preview without sending to Telegram"
+        description: "Preview only (do not send to Telegram)"
         required: false
         default: true
         type: boolean
@@ -30,53 +26,32 @@ concurrency:
 jobs:
   digest:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
+    timeout-minutes: 15
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_MODEL: "gemini-3.8-flash"
+      GEMINI_MODEL: "gemini-2.5-flash"
       TELEGRAM_CHAT_ID: "-1004343274047"
+      STRICT_AI: "1"
       TZ: Asia/Seoul
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Verify configuration
+      - name: Check required secrets
         run: |
           python - <<'PY'
           import os
-
-          token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-          gemini = os.getenv("GEMINI_API_KEY", "").strip()
-          chat = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-
-          if not token:
-              raise SystemExit("Missing TELEGRAM_BOT_TOKEN")
-
-          if not chat:
-              raise SystemExit("Missing TELEGRAM_CHAT_ID")
-
-          if gemini:
-              print("Gemini API key configured")
-          else:
-              print("Gemini API key missing; RSS fallback will be used")
-
-          print("Telegram configuration present")
+          for name in ('TELEGRAM_BOT_TOKEN', 'GEMINI_API_KEY', 'TELEGRAM_CHAT_ID'):
+              if not os.getenv(name, '').strip():
+                  raise SystemExit(f'Missing {name}')
+          print('Configuration OK')
           PY
-
       - name: Run AI-powered Korea news digest
         env:
           DIGEST_DATE: ${{ inputs.digest_date }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
         run: python bot.py
-
-      - name: Completion status
-        if: success()
-        run: echo "Korea Market Digest completed successfully"
