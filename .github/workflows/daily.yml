@@ -1,29 +1,53 @@
+
 name: Korea Market Telegram Digest
+
 on:
   schedule:
-    # 22:00 KST = 13:00 UTC (GitHub scheduled runs may be delayed)
+    # GitHub Actions cron uses UTC.
+    # 13:00 UTC = 22:00 KST.
     - cron: '0 13 * * *'
+
   workflow_dispatch:
     inputs:
+      digest_date:
+        description: 'KST digest date (YYYY-MM-DD); blank = today. Use a recent trading day to test.'
+        required: false
+        type: string
+
       dry_run:
-        description: 'Preview without posting to Telegram'
-        type: boolean
+        description: 'Preview only: true = do not send Telegram'
+        required: true
         default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: korea-market-telegram-digest
+  cancel-in-progress: false
+
 jobs:
   digest:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
+    timeout-minutes: 12
+
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: '-1004343274047'
+      OPENAI_MODEL: 'gpt-4.1-mini'
+      DIGEST_DATE: ${{ inputs.digest_date || '' }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - name: Build and send digest
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: '-1004343274047'
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
+          python-version: '3.11'
+
+      - name: Run Korea news digest
         run: python bot.py
