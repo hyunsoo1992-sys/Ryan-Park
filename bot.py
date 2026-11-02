@@ -1,352 +1,167 @@
-
-"""Korean equity news digest: Google News RSS -> OpenAI -> Telegram.
-
-Required secrets: OPENAI_API_KEY, TELEGRAM_BOT_TOKEN.
-Optional: TELEGRAM_CHAT_ID, OPENAI_MODEL, DIGEST_DATE (YYYY-MM-DD), DRY_RUN (1/0).
-"""
+"""Free Korea equity RSS digest -> Telegram. No AI API or paid services."""
 import datetime as dt
 import email.utils
 import hashlib
-import json
 import logging
 import os
 import re
 import sys
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 
-KST = ZoneInfo("Asia/Seoul")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-1004343274047")
-MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-DRY_RUN = os.getenv("DRY_RUN", "0").lower() in ("1", "true", "yes")
-
+KST = ZoneInfo('Asia/Seoul')
+CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '-1004343274047')
+DRY_RUN = os.getenv('DRY_RUN', '0').lower() in ('1', 'true', 'yes')
 TOPICS = [
-    "site:reuters.com South Korea stocks semiconductor",
-    "site:yonhapnews.co.kr 증시 기업 공시",
-    "site:hankyung.com 증시 반도체 기업",
-    "site:mk.co.kr/news 주식 기업 투자",
-    "site:biz.chosun.com 기업 주식 반도체",
-    "site:ft.com South Korea stocks",
-    "site:bloomberg.com South Korea stocks",
-    "site:dart.fss.or.kr 공시",
-    "한국 증시 반도체 조선 방산 은행 배터리",
+    'site:reuters.com South Korea stocks semiconductor',
+    'site:yonhapnews.co.kr 증시 기업 공시',
+    'site:hankyung.com 증시 반도체 기업',
+    'site:mk.co.kr/news 주식 기업 투자',
+    'site:biz.chosun.com 기업 주식 반도체',
+    'site:ft.com South Korea stocks',
+    'site:bloomberg.com South Korea stocks',
+    'site:dart.fss.or.kr 공시',
+    '한국 증시 반도체 조선 방산 은행 배터리',
+]
+PREFERRED = ('reuters', 'bloomberg', 'financial times', 'ft.com', '연합뉴스', 'yonhap', '한국경제', 'hankyung', '매일경제', 'mk.co.kr', '조선비즈', 'chosunbiz')
+TOPIC_WORDS = [
+    ('SEMICONDUCTORS', ('반도체', '하이닉스', '삼성전자', '메모리', 'hbm', 'semiconductor', 'chip', 'dram')),
+    ('BANKS', ('은행', '금융지주', 'bank')),
+    ('DEFENSE', ('방산', '방위', 'defense', 'defence')),
+    ('SHIPBUILDING', ('조선', '선박', 'shipbuilding')),
+    ('BATTERIES', ('배터리', '이차전지', '2차전지', 'battery')),
+    ('AUTOS', ('자동차', '현대차', '기아', 'auto', 'vehicle')),
+    ('MARKET', ('코스피', '코스닥', '증시', 'kospi', 'kosdaq', 'stocks')),
 ]
 
 
-def request(url, data=None, headers=None, timeout=30):
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "User-Agent": "Mozilla/5.0 KoreaMarketNewsBot/1.1",
-            **(headers or {}),
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            return response.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:700]
-        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+def request(url, data=None):
+    req = urllib.request.Request(url, data=data, headers={'User-Agent': 'Mozilla/5.0 (compatible; KoreaDigest/2.0)'})
+    with urllib.request.urlopen(req, timeout=35) as response:
+        return response.read()
 
 
-def get_feed(query, date):
-    # Search with extra calendar-day buffer.
-    # The final 15:00-21:00 KST filter is applied in collect().
-    after = date - dt.timedelta(days=2)
-    before = date + dt.timedelta(days=2)
-
-    q = (
-        f"{query} "
-        f"after:{after.isoformat()} "
-        f"before:{before.isoformat()}"
-    )
-
-    url = "https://news.google.com/rss/search?" + urllib.parse.urlencode(
-        {
-            "q": q,
-            "hl": "ko",
-            "gl": "KR",
-            "ceid": "KR:ko",
-        }
-    )
-
+def fetch(query, date):
+    after = (date - dt.timedelta(days=2)).isoformat()
+    before = (date + dt.timedelta(days=2)).isoformat()
+    url = 'https://news.google.com/rss/search?' + urllib.parse.urlencode({
+        'q': f'{query} after:{after} before:{before}', 'hl': 'ko', 'gl': 'KR', 'ceid': 'KR:ko'
+    })
     root = ET.fromstring(request(url))
-    entries = []
-
-    for item in root.findall(".//item"):
-        title = (item.findtext("title") or "").strip()
-        link = (item.findtext("link") or "").strip()
-        published = item.findtext("pubDate") or ""
-        source = item.find("source")
-
+    output = []
+    for entry in root.findall('.//item'):
+        title = (entry.findtext('title') or '').strip()
+        link = (entry.findtext('link') or '').strip()
+        source = entry.find('source')
+        source_name = source.text.strip() if source is not None and source.text else ''
         try:
-            timestamp = (
-                email.utils.parsedate_to_datetime(published)
-                .astimezone(KST)
-            )
+            published = email.utils.parsedate_to_datetime(entry.findtext('pubDate') or '').astimezone(KST)
         except (ValueError, TypeError):
             continue
-
         if title and link:
-            entries.append(
-                {
-                    "title": title,
-                    "url": link,
-                    "published_kst": timestamp.isoformat(),
-                    "source": (
-                        source.text
-                        if source is not None and source.text
-                        else ""
-                    ),
-                }
-            )
-
-    return entries
-
-
-def collect(date):
-    start = dt.datetime.combine(date, dt.time(15, 0), KST)
-    end = dt.datetime.combine(date, dt.time(21, 0), KST)
-
-    found = {}
-
-    for topic in TOPICS:
-        try:
-            feed = get_feed(topic, date)
-            logging.info(
-                "RSS %s: %d results",
-                topic[:45],
-                len(feed),
-            )
-
-            for item in feed:
-                stamp = dt.datetime.fromisoformat(
-                    item["published_kst"]
-                )
-
-                if not start <= stamp <= end:
-                    continue
-
-                normalized = re.sub(
-                    r"\W+", "", item["title"].lower()
-                )
-                key = hashlib.sha256(
-                    normalized.encode()
-                ).hexdigest()
-
-                found.setdefault(key, item)
-
-        except Exception as exc:
-            logging.warning(
-                "RSS query failed (%s): %s",
-                topic,
-                exc,
-            )
-
-        time.sleep(0.2)
-
-    return sorted(
-        found.values(),
-        key=lambda x: x["published_kst"],
-        reverse=True,
-    )
-
-
-def openai_digest(items, date):
-    api_key = os.environ["OPENAI_API_KEY"]
-
-    instructions = (
-        "You are a meticulous Korea institutional equity news editor. "
-        "Use ONLY the supplied RSS entries. "
-        "RSS titles are not full articles: "
-        "do not invent or infer numbers, quotes, specifics or article details. "
-        "Select up to 15 genuinely important, unique Korean equity stories, "
-        "prioritizing Reuters, Bloomberg, FT, DART, Yonhap, Hankyung, "
-        "Maeil and Chosun Biz. "
-        "Return plain English text, with no numbering or bullets. "
-        "Each entry must be formatted exactly as:\n"
-        "# TOPIC: One or two short factual sentences supported by the supplied headline.\n"
-        "Source: URL\n\n"
-        "Use short TOPIC labels such as SEMICONDUCTORS, BANKS, DEFENSE, SAMSUNG. "
-        "No investment implications, opinions, questions, positioning or speculation. "
-        "Use the exact provided URL for each entry, even if it is a Google News link. "
-        "Never claim to have read or verified full articles. "
-        "If fewer than 10 relevant stories exist, output fewer; never fabricate."
-    )
-
-    payload = {
-        "model": MODEL,
-        "instructions": instructions,
-        "input": json.dumps(
-            {
-                "date_kst": date.isoformat(),
-                "items": items[:120],
-            },
-            ensure_ascii=False,
-        ),
-        "max_output_tokens": 4500,
-    }
-
-    raw = request(
-        "https://api.openai.com/v1/responses",
-        json.dumps(payload).encode("utf-8"),
-        {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        timeout=120,
-    )
-
-    result = json.loads(raw)
-
-    chunks = [
-        content.get("text", "")
-        for block in result.get("output", [])
-        for content in block.get("content", [])
-        if content.get("type") == "output_text"
-    ]
-
-    output = "\n".join(chunks).strip()
-
-    if not output or "# " not in output or "Source:" not in output:
-        raise RuntimeError(
-            "OpenAI did not return a valid digest"
-        )
-
+            output.append({'title': title, 'url': link, 'source': source_name, 'time': published})
     return output
 
 
-def split_telegram(text, limit=3900):
-    if len(text) <= limit:
-        return [text]
+def collect(date):
+    start = dt.datetime.combine(date, dt.time(15), KST)
+    end = dt.datetime.combine(date, dt.time(21), KST)
+    found = {}
+    for query in TOPICS:
+        try:
+            feed = fetch(query, date)
+            logging.info('RSS %s: %s results', query[:45], len(feed))
+            for item in feed:
+                if not start <= item['time'] <= end:
+                    continue
+                title = re.sub(r'\s+[-–|]\s+[^-–|]{2,45}$', '', item['title']).strip()
+                normalized = re.sub(r'[^\w가-힣]+', '', title.casefold())
+                key = hashlib.sha256(normalized.encode()).hexdigest()
+                found.setdefault(key, item)
+        except Exception as exc:
+            logging.warning('Feed failed (%s): %s', query, exc)
+        time.sleep(0.2)
+    return list(found.values())
 
-    blocks = re.split(r"\n\s*\n", text)
-    parts = []
-    current = ""
 
+def category(title):
+    low = title.casefold()
+    for name, words in TOPIC_WORDS:
+        if any(word in low for word in words):
+            return name
+    return 'KOREA EQUITIES'
+
+
+def priority(item):
+    src = (item['source'] + ' ' + item['url']).casefold()
+    preferred = any(word in src for word in PREFERRED)
+    relevant = any(word in item['title'].casefold() for _, words in TOPIC_WORDS)
+    return (int(preferred), int(relevant), item['time'])
+
+
+def build_digest(items, date):
+    # RSS title is shown as-is: do not pretend it is an English translation.
+    # No external translation service is used in this free edition.
+    selected = sorted(items, key=priority, reverse=True)[:15]
+    if not selected:
+        raise RuntimeError('No news in the selected 15:00–21:00 KST window')
+    sections = [f'KOREA MARKET NEWS | {date.isoformat()} | 15:00–21:00 KST',
+                'RSS headline edition (original language; no article-body verification)']
+    for item in selected:
+        sections.append(f"# {category(item['title'])}: {item['title']}\nSource: {item['source'] or 'Google News RSS'} | {item['time'].strftime('%H:%M')} KST\n{item['url']}")
+    return '\n\n'.join(sections)
+
+
+def split_message(message, limit=3900):
+    if len(message) <= limit:
+        return [message]
+    blocks = message.split('\n\n')
+    output, current = [], ''
     for block in blocks:
-        candidate = (
-            current + ("\n\n" if current else "") + block
-        )
-
-        if len(candidate) > limit and current:
-            parts.append(current)
+        next_text = (current + '\n\n' if current else '') + block
+        if len(next_text) > limit and current:
+            output.append(current)
             current = block
         else:
-            current = candidate
-
+            current = next_text
         if len(current) > limit:
-            raise RuntimeError(
-                "One news item exceeds Telegram's message length limit"
-            )
-
+            raise RuntimeError('One article block is too long for Telegram')
     if current:
-        parts.append(current)
+        output.append(current)
+    return output
 
-    return parts
 
-
-def telegram_send(text):
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-
-    for chunk in split_telegram(text):
-        body = urllib.parse.urlencode(
-            {
-                "chat_id": CHAT_ID,
-                "text": chunk,
-                "disable_web_page_preview": "true",
-            }
-        ).encode()
-
-        response = json.loads(
-            request(
-                url,
-                body,
-                {
-                    "Content-Type": "application/x-www-form-urlencoded"
-                },
-                timeout=45,
-            )
-        )
-
-        if not response.get("ok"):
-            raise RuntimeError(
-                "Telegram rejected the message: " + str(response)
-            )
+def send(message):
+    token = os.environ['TELEGRAM_BOT_TOKEN']
+    for chunk in split_message(message):
+        payload = urllib.parse.urlencode({'chat_id': CHAT_ID, 'text': chunk,
+                                          'disable_web_page_preview': 'true'}).encode()
+        request(f'https://api.telegram.org/bot{token}/sendMessage', payload)
 
 
 def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
-
-    today = dt.datetime.now(KST).date()
-
-    date = (
-        dt.date.fromisoformat(os.environ["DIGEST_DATE"])
-        if os.getenv("DIGEST_DATE")
-        else today
-    )
-
-    if date > today:
-        raise ValueError(
-            "DIGEST_DATE cannot be in the future in KST"
-        )
-
-    if (
-        date == today
-        and dt.datetime.now(KST).time() < dt.time(21, 0)
-    ):
-        raise RuntimeError(
-            "Today's 15:00-21:00 KST window has not ended. "
-            "Use a past date for testing."
-        )
-
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    now = dt.datetime.now(KST)
+    date = dt.date.fromisoformat(os.environ['DIGEST_DATE']) if os.getenv('DIGEST_DATE') else now.date()
+    if date > now.date() or (date == now.date() and now.time() < dt.time(21)):
+        raise RuntimeError('Select a past date, or run after 21:00 KST today')
     articles = collect(date)
-
-    logging.info(
-        "Found %d eligible RSS entries for %s, 15:00-21:00 KST",
-        len(articles),
-        date,
-    )
-
-    if not articles:
-        raise RuntimeError(
-            "No in-window news found. "
-            "Refusing to fabricate a digest. "
-            "Try a recent trading day."
-        )
-
-    digest = openai_digest(articles, date)
-
-    message = (
-        f"KOREA MARKET NEWS | {date.isoformat()} "
-        f"| 15:00-21:00 KST\n\n{digest}"
-    )
-
+    logging.info('Eligible entries: %s', len(articles))
+    message = build_digest(articles, date)
     if DRY_RUN:
         print(message)
-        logging.info(
-            "DRY_RUN enabled: no Telegram message sent"
-        )
+        logging.info('Dry run: no Telegram message sent')
     else:
-        telegram_send(message)
-        logging.info(
-            "Telegram digest sent to channel %s",
-            CHAT_ID,
-        )
+        send(message)
+        logging.info('Sent to Telegram channel %s', CHAT_ID)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     try:
         main()
     except Exception:
-        logging.exception("Digest failed")
+        logging.exception('Digest failed')
         sys.exit(1)
