@@ -1,8 +1,10 @@
+
 name: Korea Market Telegram Digest
 
 on:
   schedule:
     - cron: "0 13 * * *" # 22:00 KST
+
   workflow_dispatch:
     inputs:
       digest_date:
@@ -10,6 +12,7 @@ on:
         required: false
         default: ""
         type: string
+
       dry_run:
         description: "Preview only (do not send to Telegram)"
         required: false
@@ -27,6 +30,7 @@ jobs:
   digest:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -34,22 +38,35 @@ jobs:
       TELEGRAM_CHAT_ID: "-1004343274047"
       STRICT_AI: "1"
       TZ: Asia/Seoul
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Check required secrets
         run: |
           python - <<'PY'
           import os
-          for name in ('TELEGRAM_BOT_TOKEN', 'GEMINI_API_KEY', 'TELEGRAM_CHAT_ID'):
-              if not os.getenv(name, '').strip():
-                  raise SystemExit(f'Missing {name}')
-          print('Configuration OK')
+
+          for name in (
+              "TELEGRAM_BOT_TOKEN",
+              "GEMINI_API_KEY",
+              "TELEGRAM_CHAT_ID"
+          ):
+              if not os.getenv(name, "").strip():
+                  raise SystemExit(f"Missing {name}")
+
+          print("Configuration OK")
           PY
+
+      - name: Validate Python syntax
+        run: python -m py_compile bot.py
+
       - name: Run AI-powered Korea news digest
         env:
           DIGEST_DATE: ${{ inputs.digest_date }}
