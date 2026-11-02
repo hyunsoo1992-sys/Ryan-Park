@@ -135,11 +135,44 @@ def split_message(message, limit=3900):
 
 
 def send(message):
-    token = os.environ['TELEGRAM_BOT_TOKEN']
-    for chunk in split_message(message):
-        payload = urllib.parse.urlencode({'chat_id': CHAT_ID, 'text': chunk,
-                                          'disable_web_page_preview': 'true'}).encode()
-        request(f'https://api.telegram.org/bot{token}/sendMessage', payload)
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+
+    for index, chunk in enumerate(split_message(message), start=1):
+        payload = urllib.parse.urlencode({
+            "chat_id": CHAT_ID,
+            "text": chunk,
+            "disable_web_page_preview": "true"
+        }).encode("utf-8")
+
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+        try:
+            request(url, payload)
+            logging.info(
+                "Telegram message %d sent successfully",
+                index
+            )
+
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode(
+                "utf-8", errors="replace"
+            )
+
+            # Avoid printing the bot token in GitHub logs.
+            error_body = error_body.replace(token, "[REDACTED]")
+
+            logging.error(
+                "Telegram API rejected message %d: "
+                "HTTP %d | %s",
+                index,
+                exc.code,
+                error_body
+            )
+
+            raise RuntimeError(
+                f"Telegram delivery failed: HTTP {exc.code}"
+            ) from None
+
 
 
 def main():
