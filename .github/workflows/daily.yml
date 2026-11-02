@@ -3,27 +3,39 @@ name: Korea Market Telegram Digest
 
 on:
   schedule:
-    # 22:00 KST = 13:00 UTC
+    # 22:00 Korea time = 13:00 UTC
     - cron: "0 13 * * *"
+
   workflow_dispatch:
     inputs:
       digest_date:
-        description: "Digest date (YYYY-MM-DD, KST). Leave blank for today."
+        description: "Digest date (YYYY-MM-DD KST). Blank = today"
         required: false
         type: string
+        default: ""
       dry_run:
-        description: "Preview only, without sending to Telegram"
+        description: "Preview only (do not send Telegram message)"
         required: false
-        default: true
         type: boolean
+        default: true
 
 permissions:
   contents: read
 
+concurrency:
+  group: korea-market-telegram-digest
+  cancel-in-progress: false
+
 jobs:
   digest:
+    name: digest
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: "-1004343274047"
+      TZ: Asia/Seoul
 
     steps:
       - name: Checkout repository
@@ -35,9 +47,7 @@ jobs:
           python-version: "3.11"
 
       - name: Check Telegram connection
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        shell: bash
         run: |
           python - <<'PY'
           import json
@@ -47,13 +57,17 @@ jobs:
           import urllib.request
 
           token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip() or "-1004343274047"
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
           if not token:
-              raise SystemExit("ERROR: TELEGRAM_BOT_TOKEN secret is missing.")
+              raise SystemExit("ERROR: TELEGRAM_BOT_TOKEN is missing.")
 
-          def check(method, params=None):
+          if not chat_id:
+              raise SystemExit("ERROR: TELEGRAM_CHAT_ID is empty.")
+
+          def telegram_api(method, params=None):
               url = f"https://api.telegram.org/bot{token}/{method}"
+
               if params:
                   url += "?" + urllib.parse.urlencode(params)
 
@@ -62,64 +76,82 @@ jobs:
                       return json.load(response)
               except urllib.error.HTTPError as exc:
                   body = exc.read().decode("utf-8", errors="replace")
-                  try:
-                      result = json.loads(body)
-                      return {
-                          "ok": False,
-                          "error_code": exc.code,
-                          "description": result.get("description", "Unknown error")
-                      }
-                  except json.JSONDecodeError:
-                      return {
-                          "ok": False,
-                          "error_code": exc.code,
-                          "description": "Non-JSON Telegram response"
-                      }
 
-          me = check("getMe")
+                  try:
+                      error = json.loads(body)
+                      description = error.get("description", "Unknown error")
+                  except json.JSONDecodeError:
+                      description = "Non-JSON response"
+
+                  return {
+                      "ok": False,
+                      "error_code": exc.code,
+                      "description": description.replace(token, "[REDACTED]")
+                  }
+
+          me = telegram_api("getMe")
+
           if not me.get("ok"):
-              print("BOT CHECK FAILED:", me.get("description", "Unknown error"))
+              print("BOT CHECK FAILED:", me.get("description"))
               raise SystemExit(1)
 
           bot = me["result"]
-          print("GITHUB BOT USERNAME: @" + bot["username"])
-          print("GITHUB BOT ID:", bot["id"])
+
+          print("CONNECTED BOT: @" + bot["username"])
+          print("BOT ID:", bot["id"])
           print("TARGET CHAT ID:", chat_id)
 
-          chat = check("getChat", {"chat_id": chat_id})
+          chat = telegram_api("getChat", {"chat_id": chat_id})
+
           if not chat.get("ok"):
               print("CHANNEL CHECK FAILED:", chat.get("description"))
-              print("Check the bot token, channel ID and channel administrator access.")
               raise SystemExit(1)
 
           print("CHANNEL FOUND:", chat["result"].get("title", "Unknown"))
           print("CHANNEL TYPE:", chat["result"].get("type", "Unknown"))
 
-          member = check("getChatMember", {
+          member = telegram_api("getChatMember", {
               "chat_id": chat_id,
               "user_id": bot["id"]
           })
 
           if not member.get("ok"):
-              print("BOT MEMBERSHIP CHECK FAILED:", member.get("description"))
+              print("MEMBERSHIP CHECK FAILED:", member.get("description"))
               raise SystemExit(1)
 
           status = member["result"].get("status")
-          print("BOT CHANNEL STATUS:", status)
+
+          print("BOT STATUS:", status)
 
           if status not in ("administrator", "creator"):
               raise SystemExit("ERROR: Bot is not a channel administrator.")
 
-          if status == "administrator" and not member["result"].get("can_post_messages", False):
-              raise SystemExit("ERROR: Bot lacks permission to post channel messages.")
+          if (
+              status == "administrator"
+              and not member["result"].get("can_post_messages", False)
+          ):
+              raise SystemExit("ERROR: Bot cannot post channel messages.")
 
           print("TELEGRAM CONNECTION CHECK PASSED")
           PY
 
       - name: Run free RSS digest
+        shell: bash
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DIGEST_DATE: ${{ inputs.digest_date }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
-        run: python bot.py
+        run: |
+          echo "Starting Korea market digest"
+          echo "Target Telegram chat: ${TELEGRAM_CHAT_ID}"
+
+          if [ "${DRY_RUN}" = "1" ]; then
+            echo "MODE: DRY RUN - Telegram delivery disabled"
+          else
+            echo "MODE: LIVE - Telegram delivery enabled"
+          fi
+
+          python bot.py
+
+      - name: Completion status
+        if: success()
+        run: echo "Korea Market Telegram Digest completed successfully."
