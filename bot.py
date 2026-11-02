@@ -98,7 +98,7 @@ def category(title):
 def priority(item):
     src = (item['source'] + ' ' + item['url']).casefold()
     preferred = any(word in src for word in PREFERRED)
-    relevant = any(word in item['title'].casefold() for _, words in TOPIC_WORDS)
+    relevant = any(word in item["title"].casefold() for _, words in TOPIC_WORDS for word in words)
     return (int(preferred), int(relevant), item['time'])
 
 
