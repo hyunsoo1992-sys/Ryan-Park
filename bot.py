@@ -1,11 +1,9 @@
 import datetime as dt
 import email.utils
-import hashlib
 import json
 import logging
 import os
 import re
-import sys
 import time
 import urllib.error
 import urllib.parse
@@ -15,10 +13,8 @@ from zoneinfo import ZoneInfo
 
 KST = ZoneInfo('Asia/Seoul')
 CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '').strip() or '-1004343274047'
-DRY_RUN = os.getenv('DRY_RUN', '0').lower() in ('1', 'true', 'yes')
 MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash').strip()
-STRICT_AI = os.getenv('STRICT_AI', '1').lower() in ('1', 'true', 'yes')
-MAX_MESSAGE = 3900
+DRY_RUN = os.getenv('DRY_RUN', '0').strip().lower() in ('1', 'true', 'yes')
 QUERIES = [
     'site:reuters.com South Korea stocks semiconductor',
     'site:yonhapnews.co.kr 증시 기업 공시',
@@ -30,67 +26,71 @@ QUERIES = [
     'site:dart.fss.or.kr 공시',
     '한국 증시 반도체 조선 방산 은행 배터리',
 ]
-WORDS = ['삼성', '하이닉스', '반도체', '은행', '금융', '방산', '조선', '배터리', '증시', '코스피', '코스닥', '주식', '주가', '공시', '수주', '자사주', '배당', '유상증자', '투자', '실적', '합병', '상장', 'semiconductor', 'stock', 'kospi', 'korea', 'memory', 'earnings', 'buyback']
-SOURCES = ['reuters', 'bloomberg', 'ft.com', 'financial times', '연합뉴스', 'yonhap', '한국경제', 'hankyung', '매일경제', '조선비즈']
 
 
-def http(url, payload=None, headers=None, timeout=30):
-    req = urllib.request.Request(url, data=payload, headers={'User-Agent': 'Mozilla/5.0 KoreaDigest/3.0', **(headers or {})})
-    with urllib.request.urlopen(req, timeout=timeout) as response:
+def fetch(url, data=None, headers=None, timeout=25):
+    request = urllib.request.Request(
+        url, data=data,
+        headers={'User-Agent': 'Mozilla/5.0', **(headers or {})},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read()
 
 
-def feed(query):
-    url = 'https://news.google.com/rss/search?' + urllib.parse.urlencode({'q': query + ' when:7d', 'hl': 'ko', 'gl': 'KR', 'ceid': 'KR:ko'})
-    root = ET.fromstring(http(url, timeout=25))
-    result = []
-    for node in root.findall('.//item'):
-        title = (node.findtext('title') or '').strip()
-        link = (node.findtext('link') or '').strip()
-        raw_date = node.findtext('pubDate') or ''
-        source_node = node.find('source')
-        if not title or not link:
-            continue
-        try:
-            published = email.utils.parsedate_to_datetime(raw_date).astimezone(KST)
-        except (ValueError, TypeError, OverflowError):
-            continue
-        source = source_node.text.strip() if source_node is not None and source_node.text else 'Unknown'
-        result.append({'title': title, 'url': link, 'source': source, 'published': published.isoformat()})
-    return result
-
-
-def collect(day):
-    start = dt.datetime.combine(day, dt.time(15), KST)
-    end = dt.datetime.combine(day, dt.time(21), KST)
-    unique = {}
+def collect(date):
+    start = dt.datetime.combine(date, dt.time(15), tzinfo=KST)
+    end = dt.datetime.combine(date, dt.time(21), tzinfo=KST)
+    articles = {}
     for query in QUERIES:
+        url = 'https://news.google.com/rss/search?' + urllib.parse.urlencode({
+            'q': query + ' when:7d', 'hl': 'ko', 'gl': 'KR', 'ceid': 'KR:ko',
+        })
         try:
-            items = feed(query)
-            logging.info('RSS %s: %d results', query, len(items))
-            for item in items:
-                stamp = dt.datetime.fromisoformat(item['published'])
-                if not start <= stamp <= end:
+            root = ET.fromstring(fetch(url))
+            count = 0
+            for item in root.findall('.//item'):
+                title = (item.findtext('title') or '').strip()
+                link = (item.findtext('link') or '').strip()
+                pubdate = item.findtext('pubDate') or ''
+                source_node = item.find('source')
+                source = (source_node.text or '').strip() if source_node is not None else 'News'
+                if not title or not link:
                     continue
-                key = hashlib.sha256(re.sub(r'\W+', '', item['title'].casefold()).encode()).hexdigest()
-                unique.setdefault(key, item)
+                try:
+                    published = email.utils.parsedate_to_datetime(pubdate).astimezone(KST)
+                except (ValueError, TypeError, OverflowError):
+                    continue
+                if not start <= published <= end:
+                    continue
+                count += 1
+                key = re.sub(r'\W+', '', title.casefold())
+                articles.setdefault(key, {'title': title, 'url': link, 'source': source,
+                                          'published': published.isoformat()})
+            logging.info('RSS %s: %s eligible', query, count)
         except Exception as exc:
-            logging.warning('RSS feed failed: %s', str(exc)[:200])
-    ranked = sorted(unique.values(), key=lambda x: (sum(w in x['title'].casefold() for w in WORDS) * 3 + sum(s in x['source'].casefold() for s in SOURCES) * 2, x['published']), reverse=True)
-    logging.info('Eligible RSS entries: %d', len(ranked))
-    return ranked[:20]
+            logging.warning('RSS source failed: %s: %s', query, exc)
+    return sorted(articles.values(), key=lambda a: a['published'], reverse=True)
 
 
-def gemini(items):
+def gemini_call(items):
     key = os.getenv('GEMINI_API_KEY', '').strip()
     if not key:
-        raise RuntimeError('GEMINI_API_KEY is missing')
-    payload_items = [{'id': i, 'headline': item['title'], 'source': item['source']} for i, item in enumerate(items)]
-    prompt = '''You are a factual institutional Korean equity news editor. Input is RSS HEADLINES ONLY, not article bodies. Return JSON with exactly the schema {"articles":[{"id":0,"topic":"SEMICONDUCTORS","headline":"English headline","summary":"One or two short factual sentences."}]}. Select 10-15 distinct market-relevant articles, or fewer if there are fewer meaningful articles. Translate Korean headlines to English. Preserve input IDs exactly. Use no facts beyond the supplied headline; never invent numbers, details, or context. If a headline cannot support a factual summary, write a short faithful restatement. No investment views, implications, generic commentary, speculation, numbering, or URLs. Each headline max 100 characters and summary max 170 characters. Output JSON only. INPUT: ''' + json.dumps(payload_items, ensure_ascii=False)
-    body = json.dumps({'contents': [{'parts': [{'text': prompt}]}], 'generationConfig': {'temperature': 0.1, 'maxOutputTokens': 3500, 'responseMimeType': 'application/json'}}).encode()
-    url = f'https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(MODEL)}:generateContent'
-    last_error = None
-    for attempt in range(1, 4):
-        try:
-            logging.info('Gemini attempt %d/3 model=%s', attempt, MODEL)
-            raw = http(url, body, {'Content-Type': 'application/json', 'x-goog-api-key': key}, timeout=65)
+        raise RuntimeError('GEMINI_API_KEY missing')
+    prompt = '''You are an institutional Korea equity news editor. Produce a factual English
+news digest from the provided RSS headlines. Headlines are NOT full articles.
+Do not invent facts, figures, context, quotations, price movements or implications.
+Translate Korean headlines into accurate English. Select 10-15 distinct, material
+Korea equity stories where available. For each, return one concise headline and
+1-2 SHORT factual sentences (only facts explicitly supported by its headline).
+Avoid generic filler. No opinions or trading recommendations.
+Return JSON only: {"articles":[{"id":0,"topic":"SEMICONDUCTORS",
+"headline":"...","summary":"..."}]}. Each id must match the input.
+Keep each headline under 90 characters and each summary under 170 characters.
+Input headlines:\n''' + json.dumps([
+        {'id': i, 'title': x['title'], 'source': x['source']}
+        for i, x in enumerate(items)
+    ], ensure_ascii=False)
+    endpoint = ('https://generativelanguage.googleapis.com/v1beta/models/'
+                + urllib.parse.quote(MODEL) + ':generateContent')
+    payload = json.dumps({
+        'contents': [{'parts': [{'text': prompt}]}],
