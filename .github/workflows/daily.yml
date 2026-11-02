@@ -3,7 +3,8 @@ name: Korea Market Telegram Digest
 
 on:
   schedule:
-    - cron: "0 13 * * *" # 22:00 KST
+    # Every day at 22:00 Korea time
+    - cron: "0 13 * * *"
 
   workflow_dispatch:
     inputs:
@@ -14,7 +15,7 @@ on:
         type: string
 
       dry_run:
-        description: "Preview only (do not send to Telegram)"
+        description: "Preview only, do not send to Telegram"
         required: false
         default: true
         type: boolean
@@ -28,13 +29,13 @@ concurrency:
 
 jobs:
   digest:
+    name: digest
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_MODEL: "gemini-2.5-flash"
       TELEGRAM_CHAT_ID: "-1004343274047"
       STRICT_AI: "1"
       TZ: Asia/Seoul
@@ -53,22 +54,143 @@ jobs:
           python - <<'PY'
           import os
 
-          for name in (
+          required = [
               "TELEGRAM_BOT_TOKEN",
               "GEMINI_API_KEY",
-              "TELEGRAM_CHAT_ID"
-          ):
-              if not os.getenv(name, "").strip():
-                  raise SystemExit(f"Missing {name}")
+              "TELEGRAM_CHAT_ID",
+          ]
 
-          print("Configuration OK")
+          for name in required:
+              if not os.getenv(name, "").strip():
+                  raise SystemExit(f"Missing required setting: {name}")
+
+          print("All required settings are present.")
           PY
 
       - name: Validate Python syntax
         run: python -m py_compile bot.py
 
+      - name: Discover available Gemini models
+        id: gemini
+        env:
+          GITHUB_OUTPUT: ${{ github.output }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          key = os.environ["GEMINI_API_KEY"].strip()
+
+          url = (
+              "https://generativelanguage.googleapis.com/"
+              "v1beta/models?pageSize=1000"
+          )
+
+          request = urllib.request.Request(
+              url,
+              headers={
+                  "x-goog-api-key": key,
+                  "Accept": "application/json",
+              },
+          )
+
+          try:
+              with urllib.request.urlopen(
+                  request, timeout=40
+              ) as response:
+                  data = json.load(response)
+
+          except urllib.error.HTTPError as exc:
+              error = exc.read().decode(
+                  "utf-8", errors="replace"
+              )
+              print("Gemini model discovery failed:", exc.code)
+              print(error[:1000])
+              raise
+
+          models = []
+
+          for item in data.get("models", []):
+              name = item.get("name", "")
+
+              methods = item.get(
+                  "supportedGenerationMethods", []
+              )
+
+              if "generateContent" in methods:
+                  models.append(
+                      name.replace("models/", "", 1)
+                  )
+
+          print("Available generation models:")
+
+          for model in models:
+              print(" -", model)
+
+          if not models:
+              raise SystemExit(
+                  "No Gemini generateContent models found."
+              )
+
+          preferred = [
+              "gemini-2.5-flash",
+              "gemini-2.5-flash-lite",
+              "gemini-2.0-flash",
+          ]
+
+          selected = None
+
+          for name in preferred:
+              if name in models:
+                  selected = name
+                  break
+
+          if selected is None:
+              flash_models = [
+                  name for name in models
+                  if "flash" in name.lower()
+                  and "image" not in name.lower()
+                  and "tts" not in name.lower()
+                  and "live" not in name.lower()
+              ]
+
+              if flash_models:
+                  selected = flash_models[0]
+
+          if selected is None:
+              raise SystemExit(
+                  "No suitable Gemini Flash model found."
+              )
+
+          print("SELECTED GEMINI MODEL:", selected)
+
+          with open(
+              os.environ["GITHUB_OUTPUT"],
+              "a",
+              encoding="utf-8",
+          ) as output:
+              output.write(f"model={selected}\n")
+          PY
+
       - name: Run AI-powered Korea news digest
         env:
+          GEMINI_MODEL: ${{ steps.gemini.outputs.model }}
           DIGEST_DATE: ${{ inputs.digest_date }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
-        run: python bot.py
+        run: |
+          echo "Gemini model: ${GEMINI_MODEL}"
+
+          if [ "${DRY_RUN}" = "1" ]; then
+            echo "MODE: DRY RUN"
+          else
+            echo "MODE: LIVE TELEGRAM DELIVERY"
+          fi
+
+          python bot.py
+
+      - name: Completion status
+        if: success()
+        run: |
+          echo "Korea Market Telegram Digest completed."
