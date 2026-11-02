@@ -1,40 +1,125 @@
+
 name: Korea Market Telegram Digest
 
 on:
   schedule:
-    - cron: '0 13 * * *' # 22:00 Asia/Seoul (UTC+9)
+    # 22:00 KST = 13:00 UTC
+    - cron: "0 13 * * *"
   workflow_dispatch:
     inputs:
       digest_date:
-        description: 'KST date YYYY-MM-DD (blank = today)'
+        description: "Digest date (YYYY-MM-DD, KST). Leave blank for today."
         required: false
         type: string
       dry_run:
-        description: 'Preview without posting to Telegram'
-        required: true
+        description: "Preview only, without sending to Telegram"
+        required: false
         default: true
         type: boolean
 
 permissions:
   contents: read
 
-concurrency:
-  group: korea-market-telegram-digest
-  cancel-in-progress: false
-
 jobs:
   digest:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
-    env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: '-1004343274047'
-      DIGEST_DATE: ${{ inputs.digest_date || '' }}
-      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
+    timeout-minutes: 10
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+
+      - name: Check Telegram connection
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip() or "-1004343274047"
+
+          if not token:
+              raise SystemExit("ERROR: TELEGRAM_BOT_TOKEN secret is missing.")
+
+          def check(method, params=None):
+              url = f"https://api.telegram.org/bot{token}/{method}"
+              if params:
+                  url += "?" + urllib.parse.urlencode(params)
+
+              try:
+                  with urllib.request.urlopen(url, timeout=20) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as exc:
+                  body = exc.read().decode("utf-8", errors="replace")
+                  try:
+                      result = json.loads(body)
+                      return {
+                          "ok": False,
+                          "error_code": exc.code,
+                          "description": result.get("description", "Unknown error")
+                      }
+                  except json.JSONDecodeError:
+                      return {
+                          "ok": False,
+                          "error_code": exc.code,
+                          "description": "Non-JSON Telegram response"
+                      }
+
+          me = check("getMe")
+          if not me.get("ok"):
+              print("BOT CHECK FAILED:", me.get("description", "Unknown error"))
+              raise SystemExit(1)
+
+          bot = me["result"]
+          print("GITHUB BOT USERNAME: @" + bot["username"])
+          print("GITHUB BOT ID:", bot["id"])
+          print("TARGET CHAT ID:", chat_id)
+
+          chat = check("getChat", {"chat_id": chat_id})
+          if not chat.get("ok"):
+              print("CHANNEL CHECK FAILED:", chat.get("description"))
+              print("Check the bot token, channel ID and channel administrator access.")
+              raise SystemExit(1)
+
+          print("CHANNEL FOUND:", chat["result"].get("title", "Unknown"))
+          print("CHANNEL TYPE:", chat["result"].get("type", "Unknown"))
+
+          member = check("getChatMember", {
+              "chat_id": chat_id,
+              "user_id": bot["id"]
+          })
+
+          if not member.get("ok"):
+              print("BOT MEMBERSHIP CHECK FAILED:", member.get("description"))
+              raise SystemExit(1)
+
+          status = member["result"].get("status")
+          print("BOT CHANNEL STATUS:", status)
+
+          if status not in ("administrator", "creator"):
+              raise SystemExit("ERROR: Bot is not a channel administrator.")
+
+          if status == "administrator" and not member["result"].get("can_post_messages", False):
+              raise SystemExit("ERROR: Bot lacks permission to post channel messages.")
+
+          print("TELEGRAM CONNECTION CHECK PASSED")
+          PY
+
       - name: Run free RSS digest
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DIGEST_DATE: ${{ inputs.digest_date }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
         run: python bot.py
